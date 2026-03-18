@@ -1,0 +1,1223 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Liga Fútbol Femenino GEBA</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet">
+
+<!-- Firebase SDK (CDN) -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import {
+    getFirestore, doc, getDoc, setDoc, onSnapshot, collection, getDocs
+  } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  // ── FIREBASE CONFIG ──────────────────────────────────────────────
+  const firebaseConfig = {
+    apiKey: "AIzaSyDtmlLG54MwHbNqw0-eV73LoQbmdTNYTTo",
+    authDomain: "liga-futbol-femenino-geba.firebaseapp.com",
+    projectId: "liga-futbol-femenino-geba",
+    storageBucket: "liga-futbol-femenino-geba.firebasestorage.app",
+    messagingSenderId: "195913943576",
+    appId: "1:195913943576:web:719d343d3dc66fb7a2916d",
+    measurementId: "G-4DY1TJJKGN"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getFirestore(app);
+
+  // ── SINGLE DOC APPROACH: everything in one Firestore document ────
+  // doc: torneos/geba  →  { nombre, temporada, equipos, jugadoras,
+  //                         partidos, goles, tarjetas, canchas, discCfg }
+  const STATE_DOC = doc(db, "torneos", "geba");
+  const PASS_DOC  = doc(db, "config",  "passwords");
+
+  // ── DEFAULT STATE ────────────────────────────────────────────────
+  function defaultState() {
+    return {
+      nombre: "Liga Fútbol Femenino GEBA",
+      temporada: "Temporada 2025",
+      equipos: [], jugadoras: [], partidos: [],
+      goles: [], tarjetas: [],
+      canchas: ["Cancha 1", "Cancha 2", "Cancha 3"],
+      discCfg: { amParaSusp: 3, fechasPorRoja: 1 },
+      adminLoggedIn: null
+    };
+  }
+
+  let S = defaultState();
+  let passwords = { org1:"geba01", org2:"geba02", org3:"geba03", org4:"geba04" };
+  let saveTimer = null;
+  let mPid = null, gmCh = {gol:{a:[],b:[]},am:{a:[],b:[]},ro:{a:[],b:[]},do:{a:[],b:[]}};
+  let mEditPid = null;
+  const USER_NAMES = { org1:"Organizador 1", org2:"Organizador 2", org3:"Organizador 3", org4:"Organizador 4" };
+
+  // ── FIREBASE SAVE (debounced 800ms) ──────────────────────────────
+  async function save() {
+    renderAll();
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(async () => {
+      try {
+        const toSave = Object.assign({}, S);
+        delete toSave.adminLoggedIn; // don't persist session
+        await setDoc(STATE_DOC, toSave);
+      } catch(e) {
+        showNotif("Error al guardar: " + e.message, true);
+      }
+    }, 800);
+  }
+
+  async function savePasswords() {
+    try { await setDoc(PASS_DOC, passwords); } catch(e) {}
+  }
+
+  // ── FIREBASE LOAD + REALTIME LISTENER ───────────────────────────
+  async function loadInitial() {
+    showLoading(true);
+    try {
+      // passwords
+      const pSnap = await getDoc(PASS_DOC);
+      if (pSnap.exists()) passwords = pSnap.data();
+      else await setDoc(PASS_DOC, passwords);
+
+      // state
+      const sSnap = await getDoc(STATE_DOC);
+      if (sSnap.exists()) {
+        const data = sSnap.data();
+        S = Object.assign(defaultState(), data);
+        S.adminLoggedIn = null;
+      } else {
+        await setDoc(STATE_DOC, defaultState());
+      }
+    } catch(e) {
+      showNotif("Error de conexión. Verificá Firestore.", true);
+    }
+    showLoading(false);
+    renderAll();
+    startFixInfo();
+
+    // Realtime listener
+    onSnapshot(STATE_DOC, (snap) => {
+      if (snap.exists()) {
+        const prev = S.adminLoggedIn;
+        S = Object.assign(defaultState(), snap.data());
+        S.adminLoggedIn = prev; // preserve local session
+        renderAll();
+      }
+    });
+    onSnapshot(PASS_DOC, (snap) => {
+      if (snap.exists()) passwords = snap.data();
+    });
+  }
+
+  function showLoading(show) {
+    document.getElementById('loadingOverlay').style.display = show ? 'flex' : 'none';
+  }
+
+  // ── TABS ─────────────────────────────────────────────────────────
+  window.showTab = function(t, btn) {
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('on'));
+    document.querySelectorAll('.tbtn').forEach(b => b.classList.remove('on'));
+    document.getElementById('tab-' + t).classList.add('on');
+    if (btn) btn.classList.add('on');
+  };
+  window.showATab = function(t, btn) {
+    document.querySelectorAll('.acont').forEach(c => c.classList.remove('on'));
+    document.querySelectorAll('.atab').forEach(b => b.classList.remove('on'));
+    document.getElementById(t).classList.add('on');
+    if (btn) btn.classList.add('on');
+    if (t === 'a-res') renderResAdmin();
+    if (t === 'a-fix') startFixInfo();
+    if (t === 'a-cfg') loadCfgForm();
+    if (t === 'a-disc') renderDiscAdmin();
+  };
+
+  // ── AUTH ─────────────────────────────────────────────────────────
+  window.toggleAdmin = function() {
+    const p = document.getElementById('adminPanel');
+    const b = document.getElementById('adminToggleBtn');
+    if (p.style.display === 'none') {
+      p.style.display = 'block'; b.classList.add('on');
+      p.scrollIntoView({ behavior: 'smooth' });
+      if (S.adminLoggedIn) showDash();
+    } else {
+      p.style.display = 'none'; b.classList.remove('on');
+    }
+  };
+  window.doLogin = function() {
+    const u = document.getElementById('loginUser').value;
+    const pw = document.getElementById('loginPass').value;
+    document.getElementById('loginError').textContent = '';
+    if (!u) { document.getElementById('loginError').textContent = 'Seleccioná un usuario.'; return; }
+    if (passwords[u] !== pw) { document.getElementById('loginError').textContent = 'Contraseña incorrecta.'; return; }
+    S.adminLoggedIn = u;
+    showDash(); showNotif('Bienvenida, ' + USER_NAMES[u] + ' 👋');
+  };
+  window.doLogout = function() {
+    S.adminLoggedIn = null;
+    document.getElementById('adminDash').style.display = 'none';
+    document.getElementById('adminLogin').style.display = 'block';
+    document.getElementById('loginPass').value = '';
+  };
+  function showDash() {
+    document.getElementById('adminLogin').style.display = 'none';
+    document.getElementById('adminDash').style.display = 'block';
+    document.getElementById('adminLbl').textContent = 'Sesión: ' + USER_NAMES[S.adminLoggedIn];
+    renderEqAdmin(); renderJugAdmin(); renderFixAdmin(); startFixInfo();
+  }
+
+  // ── CONFIG ───────────────────────────────────────────────────────
+  function loadCfgForm() {
+    document.getElementById('cfgNombre').value = S.nombre || '';
+    document.getElementById('cfgTemp').value   = S.temporada || '';
+    document.getElementById('cfgAm').value     = S.discCfg.amParaSusp || 3;
+    document.getElementById('cfgRo').value     = S.discCfg.fechasPorRoja || 1;
+    renderCanchas();
+  }
+  window.saveNombre = function() {
+    const n = document.getElementById('cfgNombre').value.trim();
+    const t = document.getElementById('cfgTemp').value.trim();
+    if (!n) { showNotif('El nombre no puede estar vacío'); return; }
+    S.nombre = n; S.temporada = t;
+    document.getElementById('torneoNombre').textContent = n;
+    document.getElementById('torneoTemporada').textContent = t;
+    save(); showNotif('Nombre actualizado ✓');
+  };
+  window.saveCfgDisc = function() {
+    S.discCfg.amParaSusp    = parseInt(document.getElementById('cfgAm').value) || 3;
+    S.discCfg.fechasPorRoja = parseInt(document.getElementById('cfgRo').value) || 1;
+    save(); showNotif('Configuración de disciplina guardada ✓');
+  };
+  window.changePass = function() {
+    const a = document.getElementById('pAct').value;
+    const n = document.getElementById('pNueva').value;
+    const c = document.getElementById('pConf').value;
+    const msg = document.getElementById('passMsg');
+    msg.className = 'berr'; msg.textContent = '';
+    if (passwords[S.adminLoggedIn] !== a) { msg.textContent = 'Contraseña actual incorrecta.'; return; }
+    if (n.length < 4) { msg.textContent = 'Mínimo 4 caracteres.'; return; }
+    if (n !== c) { msg.textContent = 'No coinciden.'; return; }
+    passwords[S.adminLoggedIn] = n;
+    savePasswords();
+    ['pAct','pNueva','pConf'].forEach(id => document.getElementById(id).value = '');
+    msg.className = 'bok'; msg.textContent = '✓ Contraseña actualizada.';
+    showNotif('Contraseña actualizada ✓');
+  };
+
+  // ── CANCHAS ──────────────────────────────────────────────────────
+  window.addCancha = function() {
+    const v = document.getElementById('nCancha').value.trim();
+    if (!v) return;
+    if (!S.canchas.includes(v)) S.canchas.push(v);
+    document.getElementById('nCancha').value = '';
+    save(); renderCanchas(); showNotif('"' + v + '" agregada ✓');
+  };
+  window.delCancha = function(c) {
+    S.canchas = S.canchas.filter(x => x !== c);
+    save(); renderCanchas();
+  };
+  function renderCanchas() {
+    const el = document.getElementById('canchasList'); if (!el) return;
+    el.innerHTML = S.canchas.length
+      ? S.canchas.map(c => `<div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--gr)"><span style="font-size:13px">🏟 ${c}</span><button class="bd" onclick="delCancha('${c}')">✕</button></div>`).join('')
+      : '<p style="font-size:12px;color:var(--gt)">Sin canchas.</p>';
+  }
+  function fillCanchaSelect(selId, current) {
+    const sel = document.getElementById(selId); if (!sel) return;
+    sel.innerHTML = '<option value="">Sin cancha asignada</option>' + S.canchas.map(c => `<option value="${c}"${c===current?' selected':''}>${c}</option>`).join('');
+  }
+
+  // ── EQUIPOS ──────────────────────────────────────────────────────
+  window.addEq = function() {
+    const n = document.getElementById('nEq').value.trim();
+    const c = document.getElementById('cEq').value;
+    if (!n) { showNotif('Ingresá el nombre'); return; }
+    if (S.equipos.find(e => e.nombre.toLowerCase() === n.toLowerCase())) { showNotif('Ya existe ese equipo'); return; }
+    S.equipos.push({ id: 'e' + Date.now(), nombre: n, color: c });
+    document.getElementById('nEq').value = '';
+    save(); renderEqAdmin(); startFixInfo(); showNotif('"' + n + '" agregado ✓');
+  };
+  window.delEq = function(id) {
+    if (!confirm('¿Eliminar equipo? Se borrarán sus jugadoras.')) return;
+    S.equipos    = S.equipos.filter(e => e.id !== id);
+    S.jugadoras  = S.jugadoras.filter(j => j.equipoId !== id);
+    save(); renderEqAdmin(); renderJugAdmin(); startFixInfo();
+  };
+  window.startEditEq = function(id) {
+    const e = S.equipos.find(x => x.id === id); if (!e) return;
+    document.getElementById('eq-nm-' + id).innerHTML = `<input class="einput" id="einp-${id}" value="${e.nombre}" onkeydown="if(event.key==='Enter')saveEditEq('${id}')"> <button class="bsm" onclick="saveEditEq('${id}')">✓</button> <button class="bd" onclick="renderEqAdmin()">✕</button>`;
+  };
+  window.saveEditEq = function(id) {
+    const v = document.getElementById('einp-' + id).value.trim(); if (!v) return;
+    S.equipos.find(e => e.id === id).nombre = v;
+    save(); renderEqAdmin(); showNotif('Actualizado ✓');
+  };
+  function renderEqAdmin() {
+    const el = document.getElementById('eqAdminList'); if (!el) return;
+    if (!S.equipos.length) { el.innerHTML = '<p style="color:var(--gt);font-size:13px">Sin equipos todavía.</p>'; return; }
+    el.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px">${S.equipos.map(e => {
+      const jc = S.jugadoras.filter(j => j.equipoId === e.id).length;
+      return `<div class="ecard"><div class="ecard-hdr" style="background:${e.color}"></div>
+        <div class="ecard-body"><div id="eq-nm-${e.id}" style="font-weight:700;font-size:14px;margin-bottom:3px">${e.nombre}</div>
+        <div style="font-size:12px;color:var(--gt)">${jc} jugadora${jc!==1?'s':''}</div>
+        <div style="display:flex;gap:5px;margin-top:7px">
+          <button class="bsm" onclick="startEditEq('${e.id}')">✏️ Editar</button>
+          <button class="bd" onclick="delEq('${e.id}')">Eliminar</button>
+        </div></div></div>`;
+    }).join('')}</div>`;
+  }
+
+  // ── JUGADORAS ─────────────────────────────────────────────────────
+  window.addJug = function() {
+    const n   = document.getElementById('nJug').value.trim();
+    const d   = parseInt(document.getElementById('dJug').value) || 0;
+    const eid = document.getElementById('eJug').value;
+    const dni = document.getElementById('dniJug').value.trim();
+    const fnac = document.getElementById('fnacJug').value;
+    if (!n)   { showNotif('Ingresá el nombre'); return; }
+    if (!eid) { showNotif('Seleccioná equipo'); return; }
+    S.jugadoras.push({ id: 'j' + Date.now(), nombre: n, dorsal: d, equipoId: eid, dni, fnac });
+    document.getElementById('nJug').value = '';
+    document.getElementById('dJug').value = '';
+    document.getElementById('dniJug').value = '';
+    document.getElementById('fnacJug').value = '';
+    save(); renderJugAdmin(); showNotif(n + ' agregada ✓');
+  };
+  window.delJug = function(id) {
+    S.jugadoras = S.jugadoras.filter(j => j.id !== id);
+    save(); renderJugAdmin();
+  };
+  window.startEditJug = function(id) {
+    const j = S.jugadoras.find(x => x.id === id); if (!j) return;
+    document.getElementById('jug-nm-' + id).innerHTML = `<input class="einput" id="jinp-${id}" value="${j.nombre}" onkeydown="if(event.key==='Enter')saveEditJug('${id}')"> <button class="bsm" onclick="saveEditJug('${id}')">✓</button> <button class="bd" onclick="renderJugAdmin()">✕</button>`;
+  };
+  window.saveEditJug = function(id) {
+    const v = document.getElementById('jinp-' + id).value.trim(); if (!v) return;
+    S.jugadoras.find(j => j.id === id).nombre = v;
+    save(); renderJugAdmin(); showNotif('Actualizado ✓');
+  };
+  function renderJugAdmin() {
+    const sel = document.getElementById('eJug');
+    if (sel) sel.innerHTML = '<option value="">Seleccionar equipo...</option>' + S.equipos.map(e => `<option value="${e.id}">${e.nombre}</option>`).join('');
+    const el = document.getElementById('jugAdminList'); if (!el) return;
+    if (!S.jugadoras.length) { el.innerHTML = '<p style="color:var(--gt);font-size:13px">Sin jugadoras.</p>'; return; }
+    const grupos = S.equipos.map(e => ({ eq: e, jugs: S.jugadoras.filter(j => j.equipoId === e.id) })).filter(g => g.jugs.length);
+    el.innerHTML = grupos.map(g => `<div style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:7px;margin-bottom:5px">
+        <div style="width:9px;height:9px;border-radius:50%;background:${g.eq.color}"></div>
+        <strong style="font-size:13px">${g.eq.nombre}</strong>
+        <span style="font-size:11px;color:var(--gt)">${g.jugs.length} jugadoras</span>
+      </div>
+      <table class="mtable"><thead><tr><th>#</th><th>Nombre</th><th>Dorsal</th><th>DNI</th><th>Nacimiento</th><th>🟨</th><th>🟥</th><th></th></tr></thead>
+      <tbody>${g.jugs.map((j, i) => {
+        const disc = getDiscJugadora(j.id);
+        const susp = getSuspendidas().find(s => s.jugadora.id === j.id);
+        const edad = j.fnac ? calcEdad(j.fnac) : null;
+        return `<tr>
+          <td style="color:var(--gt)">${i+1}</td>
+          <td id="jug-nm-${j.id}">${j.nombre}${susp ? ` <span class="badge-susp">SUSP</span>` : ''}</td>
+          <td>${j.dorsal || '—'}</td>
+          <td style="font-size:12px;color:var(--gt)">${j.dni || '—'}</td>
+          <td style="font-size:12px;color:var(--gt)">${j.fnac ? fmtFecha(j.fnac) + (edad !== null ? ` <span style="color:var(--v);font-size:10px">(${edad}a)</span>` : '') : '—'}</td>
+          <td style="color:#c9a014;font-weight:600">${disc.ams}</td>
+          <td style="color:var(--ro);font-weight:600">${disc.ros}</td>
+          <td style="display:flex;gap:4px">
+            <button class="bsm" style="font-size:10px" onclick="startEditJug('${j.id}')">✏️</button>
+            <button class="bd" onclick="delJug('${j.id}')">✕</button>
+          </td></tr>`;
+      }).join('')}</tbody></table></div>`).join('');
+  }
+
+  // ── FIXTURE ───────────────────────────────────────────────────────
+  function startFixInfo() {
+    updateFixInfo();
+    const fi = document.getElementById('fxFecha');
+    if (fi && !fi.value) fi.value = new Date().toISOString().split('T')[0];
+  }
+  function updateFixInfo() {
+    const n = S.equipos.length;
+    const el = document.getElementById('eqCount'); if (el) el.textContent = n;
+    const r = n >= 2 ? (n % 2 === 0 ? n - 1 : n) : 0;
+    const p = n >= 2 ? Math.floor(n / 2) * r : 0;
+    const ri = document.getElementById('rondasInfo');
+    if (ri) ri.textContent = n >= 2 ? r + ' fechas, ' + p + ' partidos' : 'necesitás al menos 2 equipos';
+  }
+  window.genFix = function() {
+    if (S.equipos.length < 2) { showNotif('Necesitás al menos 2 equipos'); return; }
+    if (S.partidos.length > 0 && !confirm('Ya hay un fixture. ¿Reemplazarlo?')) return;
+    const fs   = document.getElementById('fxFecha').value;
+    const dias = parseInt(document.getElementById('fxDias').value) || 7;
+    let base   = fs ? new Date(fs + 'T12:00:00') : new Date();
+    let ids    = [...S.equipos.map(e => e.id)];
+    if (ids.length % 2 !== 0) ids.push(null);
+    const n = ids.length, rondas = n - 1;
+    S.partidos = []; let pid = 1;
+    for (let r = 0; r < rondas; r++) {
+      const fStr = base.toISOString().split('T')[0];
+      for (let m = 0; m < n / 2; m++) {
+        const loc = ids[m], vis = ids[n - 1 - m];
+        if (loc && vis) S.partidos.push({ id: 'p' + pid++, fecha: r + 1, fechaStr: fStr, local: loc, visita: vis, golesLocal: null, golesVisita: null, jugado: false, cancha: '', hora: '' });
+      }
+      const last = ids.pop(); ids.splice(1, 0, last);
+      base = new Date(base.getTime() + dias * 86400000);
+    }
+    save(); renderFix(); renderFixAdmin();
+    showNotif(`Fixture: ${S.partidos.length} partidos en ${rondas} fechas ✓`);
+  };
+
+  function renderFixAdmin() {
+    const el = document.getElementById('fixAdminList'); if (!el) return;
+    if (!S.partidos.length) { el.innerHTML = '<p style="color:var(--gt);font-size:13px">Sin fixture generado.</p>'; return; }
+    const fechas = [...new Set(S.partidos.map(p => p.fecha))].sort((a,b) => a - b);
+    el.innerHTML = fechas.map(f => {
+      const ps = S.partidos.filter(p => p.fecha === f);
+      return `<div class="fcard">
+        <div class="fhdr"><span>Fecha ${f}</span><span class="fdate">${fmtFecha(ps[0].fechaStr)}</span></div>
+        ${ps.map(p => {
+          const eL = getEq(p.local), eV = getEq(p.visita);
+          return `<div class="prow">
+            <div class="ta"><span class="tdot" style="background:${eL.color}"></span>${eL.nombre}</div>
+            <div style="text-align:center">
+              ${p.jugado ? `<div class="sbox">${p.golesLocal}<span class="ssep">—</span>${p.golesVisita}</div>` : `<span class="badge bpend">Pendiente</span>`}
+              ${p.cancha ? `<div class="pinfo">🏟 ${p.cancha}${p.hora ? ' · ' + p.hora : ''}</div>` : ''}
+            </div>
+            <div class="tb"><span class="tdot" style="background:${eV.color}"></span>${eV.nombre}</div>
+            <div style="display:flex;gap:4px;margin-left:5px">
+              <button class="bsm" onclick="openEditPartido('${p.id}')" title="Editar">✏️</button>
+              <button class="bsm" onclick="openModal('${p.id}')" title="Resultado">${p.jugado ? '🔄' : '⚽'}</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`;
+    }).join('');
+  }
+
+  function renderResAdmin() {
+    const el = document.getElementById('resAdminList'); if (!el) return;
+    if (!S.partidos.length) { el.innerHTML = '<p style="color:var(--gt);font-size:13px">Sin partidos cargados.</p>'; return; }
+    const pend = S.partidos.filter(p => !p.jugado);
+    const jug  = S.partidos.filter(p => p.jugado);
+    el.innerHTML = `
+      ${pend.length ? `<div class="sec-title" style="font-size:14px;margin-bottom:8px">Pendientes (${pend.length})</div>${pend.map(p => pAdminRow(p)).join('')}` : ''}
+      ${jug.length  ? `<div class="sec-title" style="font-size:14px;margin:14px 0 8px">Jugados (${jug.length})</div>${jug.map(p => pAdminRow(p)).join('')}` : ''}
+    `;
+  }
+  function pAdminRow(p) {
+    const eL = getEq(p.local), eV = getEq(p.visita);
+    return `<div class="prow" style="background:#fff;border:1px solid var(--gr);border-radius:8px;margin-bottom:7px">
+      <div class="ta"><span class="tdot" style="background:${eL.color}"></span>${eL.nombre}</div>
+      <div style="text-align:center">
+        ${p.jugado ? `<div class="sbox">${p.golesLocal}<span class="ssep">—</span>${p.golesVisita}</div>` : `<span class="badge bpend">Pend.</span>`}
+        <div class="pinfo">F${p.fecha}${p.cancha ? ' · ' + p.cancha : ''}${p.hora ? ' · ' + p.hora : ''}</div>
+      </div>
+      <div class="tb"><span class="tdot" style="background:${eV.color}"></span>${eV.nombre}</div>
+      <button class="bsm" onclick="openModal('${p.id}')" style="margin-left:5px">${p.jugado ? '✏️' : '⚽'}</button>
+    </div>`;
+  }
+
+  // ── MODAL RESULTADO ───────────────────────────────────────────────
+  window.openModal = function(pid) {
+    mPid = pid;
+    gmCh = { gol:{a:[],b:[]}, am:{a:[],b:[]}, ro:{a:[],b:[]}, do:{a:[],b:[]} };
+    const p  = S.partidos.find(x => x.id === pid);
+    const eL = getEq(p.local), eV = getEq(p.visita);
+    document.getElementById('mInfo').textContent  = `Fecha ${p.fecha} — ${fmtFecha(p.fechaStr)}`;
+    document.getElementById('mTA').textContent    = eL.nombre;
+    document.getElementById('mTB').textContent    = eV.nombre;
+    document.getElementById('gA').value           = p.jugado ? p.golesLocal  : 0;
+    document.getElementById('gB').value           = p.jugado ? p.golesVisita : 0;
+    document.getElementById('mHora').value        = p.hora || '';
+    document.getElementById('glblA').textContent  = eL.nombre;
+    document.getElementById('glblB').textContent  = eV.nombre;
+    document.getElementById('amLblA').textContent = eL.nombre;
+    document.getElementById('amLblB').textContent = eV.nombre;
+    document.getElementById('roLblA').textContent = eL.nombre;
+    document.getElementById('roLblB').textContent = eV.nombre;
+    fillCanchaSelect('mCancha', p.cancha || '');
+    fillJSel('jselA', p.local); fillJSel('jselB', p.visita);
+    fillJSel('jselAmA', p.local); fillJSel('jselAmB', p.visita);
+    fillJSel('jselRoA', p.local); fillJSel('jselRoB', p.visita);
+    if (p.jugado) {
+      S.goles.filter(g => g.partidoId === pid).forEach(g => {
+        const s = g.equipoId === p.local ? 'a' : 'b';
+        gmCh.gol[s].push({ jugId: g.jugId, jugNombre: g.jugNombre, cant: g.cant });
+      });
+      S.tarjetas.filter(t => t.partidoId === pid).forEach(t => {
+        const s = t.equipoId === p.local ? 'a' : 'b';
+        gmCh[t.tipo][s].push({ jugId: t.jugId, jugNombre: t.jugNombre });
+      });
+    }
+    renderAllChips();
+    document.getElementById('mRes').classList.add('on');
+  };
+  function fillJSel(selId, eid) {
+    const jugs = S.jugadoras.filter(j => j.equipoId === eid);
+    document.getElementById(selId).innerHTML = '<option value="">Jugadora...</option>' +
+      jugs.map(j => `<option value="${j.id}">${j.nombre}${j.dorsal ? ' (#' + j.dorsal + ')' : ''}</option>`).join('');
+  }
+  window.addChip = function(tipo, side) {
+    const selMap = { gol:{a:'jselA',b:'jselB'}, am:{a:'jselAmA',b:'jselAmB'}, ro:{a:'jselRoA',b:'jselRoB'}, do:{a:'jselRoA',b:'jselRoB'} };
+    const jugId = document.getElementById(selMap[tipo][side]).value;
+    if (!jugId) { showNotif('Seleccioná una jugadora'); return; }
+    const jug = S.jugadoras.find(j => j.id === jugId);
+    if (tipo === 'gol') {
+      const cant = parseInt(document.getElementById(side === 'a' ? 'cgA' : 'cgB').value) || 1;
+      const ex = gmCh.gol[side].find(g => g.jugId === jugId);
+      if (ex) ex.cant += cant; else gmCh.gol[side].push({ jugId, jugNombre: jug.nombre, cant });
+    } else {
+      if (tipo !== 'do' && gmCh[tipo][side].find(g => g.jugId === jugId)) { showNotif('Ya tiene esa tarjeta'); return; }
+      gmCh[tipo][side].push({ jugId, jugNombre: jug.nombre });
+    }
+    renderAllChips();
+  };
+  window.removeChipIdx = function(tipo, side, idx) {
+    gmCh[tipo][side].splice(idx, 1); renderAllChips();
+  };
+  function renderAllChips() {
+    ['a','b'].forEach(s => {
+      document.getElementById('chipsGol' + s.toUpperCase()).innerHTML =
+        gmCh.gol[s].map((g,i) => `<div class="gchip chip-gol">${g.jugNombre} (${g.cant}) <button onclick="removeChipIdx('gol','${s}',${i})">×</button></div>`).join('');
+      document.getElementById('chipsAm' + s.toUpperCase()).innerHTML =
+        gmCh.am[s].map((g,i) => `<div class="gchip chip-am"><span class="card-am"></span>${g.jugNombre} <button onclick="removeChipIdx('am','${s}',${i})">×</button></div>`).join('');
+      document.getElementById('chipsRo' + s.toUpperCase()).innerHTML = [
+        ...gmCh.ro[s].map((g,i) => `<div class="gchip chip-ro"><span class="card-ro"></span>${g.jugNombre} <button onclick="removeChipIdx('ro','${s}',${i})">×</button></div>`),
+        ...gmCh.do[s].map((g,i) => `<div class="gchip" style="background:#e67e22"><span class="card-do"></span>${g.jugNombre} <button onclick="removeChipIdx('do','${s}',${i})">×</button></div>`)
+      ].join('');
+    });
+  }
+  window.saveRes = function() {
+    const p = S.partidos.find(x => x.id === mPid);
+    p.golesLocal  = parseInt(document.getElementById('gA').value) || 0;
+    p.golesVisita = parseInt(document.getElementById('gB').value) || 0;
+    p.jugado  = true;
+    p.cancha  = document.getElementById('mCancha').value || '';
+    p.hora    = document.getElementById('mHora').value   || '';
+    S.goles   = S.goles.filter(g => g.partidoId !== mPid);
+    S.tarjetas = S.tarjetas.filter(t => t.partidoId !== mPid);
+    ['a','b'].forEach(s => {
+      const eid = s === 'a' ? p.local : p.visita;
+      gmCh.gol[s].forEach(g => S.goles.push({ partidoId: mPid, jugId: g.jugId, jugNombre: g.jugNombre, cant: g.cant, equipoId: eid }));
+      ['am','ro','do'].forEach(tipo => gmCh[tipo][s].forEach(g => S.tarjetas.push({ partidoId: mPid, jugId: g.jugId, jugNombre: g.jugNombre, equipoId: eid, tipo, nroFecha: p.fecha })));
+    });
+    closeModal('mRes'); save(); renderFixAdmin(); renderResAdmin();
+    showNotif('Resultado guardado ✓');
+  };
+
+  // ── EDITAR PARTIDO ────────────────────────────────────────────────
+  window.openEditPartido = function(pid) {
+    mEditPid = pid;
+    const p = S.partidos.find(x => x.id === pid);
+    document.getElementById('eFecha').value = p.fechaStr || '';
+    document.getElementById('eHora').value  = p.hora     || '';
+    fillCanchaSelect('eCancha', p.cancha || '');
+    const sL = document.getElementById('eLocal'), sV = document.getElementById('eVisita');
+    sL.innerHTML = S.equipos.map(e => `<option value="${e.id}"${e.id===p.local?' selected':''}>${e.nombre}</option>`).join('');
+    sV.innerHTML = S.equipos.map(e => `<option value="${e.id}"${e.id===p.visita?' selected':''}>${e.nombre}</option>`).join('');
+    document.getElementById('mEdit').classList.add('on');
+  };
+  window.saveEditPartido = function() {
+    const p  = S.partidos.find(x => x.id === mEditPid);
+    const nL = document.getElementById('eLocal').value;
+    const nV = document.getElementById('eVisita').value;
+    if (nL === nV) { showNotif('Los equipos no pueden ser iguales'); return; }
+    p.fechaStr = document.getElementById('eFecha').value || p.fechaStr;
+    p.cancha   = document.getElementById('eCancha').value || '';
+    p.hora     = document.getElementById('eHora').value   || '';
+    p.local    = nL; p.visita = nV;
+    closeModal('mEdit'); save(); renderFixAdmin(); showNotif('Partido actualizado ✓');
+  };
+  window.closeModal = function(id) { document.getElementById(id).classList.remove('on'); };
+
+  // ── DISCIPLINA ────────────────────────────────────────────────────
+  function getDiscJugadora(jugId) {
+    const ams = S.tarjetas.filter(t => t.jugId === jugId && t.tipo === 'am').length;
+    const ros = S.tarjetas.filter(t => t.jugId === jugId && (t.tipo === 'ro' || t.tipo === 'do')).length;
+    return { ams, ros };
+  }
+  function getSuspendidas() {
+    const result = [];
+    S.jugadoras.forEach(j => {
+      const ams   = S.tarjetas.filter(t => t.jugId === j.id && t.tipo === 'am');
+      const rojas = S.tarjetas.filter(t => t.jugId === j.id && (t.tipo === 'ro' || t.tipo === 'do'));
+      const suspAm = Math.floor(ams.length / S.discCfg.amParaSusp);
+      let suspRoja = 0;
+      if (rojas.length > 0) {
+        const ultimaRoja    = Math.max(...rojas.map(r => r.nroFecha || 0));
+        const fechasCumplidas = S.partidos.filter(p => p.jugado && p.fecha > ultimaRoja && (p.local === j.equipoId || p.visita === j.equipoId)).length;
+        if (fechasCumplidas < S.discCfg.fechasPorRoja) suspRoja = S.discCfg.fechasPorRoja - fechasCumplidas;
+      }
+      if (suspAm > 0 || suspRoja > 0) {
+        const motivo = [];
+        if (suspAm > 0) motivo.push(`${ams.length} amarillas`);
+        if (suspRoja > 0) motivo.push(`roja (${suspRoja} fecha${suspRoja > 1 ? 's' : ''})`);
+        result.push({ jugadora: j, motivo });
+      }
+    });
+    return result;
+  }
+
+  function renderDiscPublic() {
+    const susp = getSuspendidas();
+    const bannerEl = document.getElementById('suspBannerPos');
+    if (bannerEl) {
+      bannerEl.innerHTML = susp.length
+        ? `<div class="susp-banner"><h4>🚫 Jugadoras suspendidas para la próxima fecha</h4>${susp.map(s => { const eq = getEq(s.jugadora.equipoId); return `<div class="susp-item"><span class="tdot" style="background:${eq.color}"></span><strong>${s.jugadora.nombre}</strong><span style="color:var(--gt);font-size:12px">${eq.nombre}</span><span class="badge-susp">SUSP</span><span style="font-size:11px;color:var(--gt)">${s.motivo.join(', ')}</span></div>`; }).join('')}</div>`
+        : '';
+    }
+    const discSuspEl = document.getElementById('discSuspendidas');
+    if (discSuspEl) {
+      discSuspEl.innerHTML = susp.length
+        ? `<div class="susp-banner" style="margin-bottom:16px"><h4>🚫 Suspendidas para la próxima fecha (${susp.length})</h4>${susp.map(s => { const eq = getEq(s.jugadora.equipoId); return `<div class="susp-item"><span class="tdot" style="background:${eq.color}"></span><strong>${s.jugadora.nombre}</strong><span style="color:var(--gt);font-size:12px">${eq.nombre}</span><span class="badge-susp">SUSP</span><span style="font-size:11px;color:var(--gt)">${s.motivo.join(', ')}</span></div>`; }).join('')}</div>`
+        : `<div class="badge-ok" style="margin-bottom:16px;padding:10px 14px;border-radius:8px">✓ No hay jugadoras suspendidas.</div>`;
+    }
+    const discEl = document.getElementById('discTabla');
+    if (!discEl) return;
+    const conT = S.jugadoras.filter(j => { const d = getDiscJugadora(j.id); return d.ams > 0 || d.ros > 0; }).sort((a,b) => { const da = getDiscJugadora(a.id), db = getDiscJugadora(b.id); return (db.ros - da.ros) || (db.ams - da.ams); });
+    if (!conT.length) { discEl.innerHTML = '<p style="color:var(--gt);font-size:13px">Ninguna jugadora tiene tarjetas todavía.</p>'; return; }
+    const grupos = S.equipos.map(e => ({ eq: e, jugs: conT.filter(j => j.equipoId === e.id) })).filter(g => g.jugs.length);
+    discEl.innerHTML = `<div class="disp-grid">${grupos.map(g => `<div class="disp-card">
+      <div class="disp-card-hdr"><span class="tdot" style="background:${g.eq.color}"></span><strong>${g.eq.nombre}</strong></div>
+      <table class="disp-table"><tbody>${g.jugs.map(j => {
+        const d = getDiscJugadora(j.id);
+        const susp = getSuspendidas().find(s => s.jugadora.id === j.id);
+        return `<tr>
+          <td>${j.nombre}${susp ? ` <span class="badge-susp">SUSP</span>` : ''}</td>
+          <td>${'<span class="card-am"></span>'.repeat(Math.min(d.ams,6))} <strong style="color:#c9a014">${d.ams}</strong></td>
+          <td>${d.ros > 0 ? '<span class="card-ro"></span>'.repeat(Math.min(d.ros,3)) + ` <strong style="color:var(--ro)">${d.ros}</strong>` : ''}</td>
+        </tr>`;
+      }).join('')}</tbody></table>
+    </div>`).join('')}</div>`;
+  }
+
+  function renderDiscAdmin() {
+    document.getElementById('cfgAm').value = S.discCfg.amParaSusp    || 3;
+    document.getElementById('cfgRo').value = S.discCfg.fechasPorRoja || 1;
+    const susp = getSuspendidas();
+    const suspEl = document.getElementById('discAdminSusp');
+    if (suspEl) {
+      suspEl.innerHTML = susp.length
+        ? susp.map(s => { const eq = getEq(s.jugadora.equipoId); return `<div class="prow" style="background:#fff;border:1px solid #f5c6c6;border-radius:8px;margin-bottom:7px;gap:10px"><span class="tdot" style="background:${eq.color}"></span><strong>${s.jugadora.nombre}</strong><span style="font-size:12px;color:var(--gt)">${eq.nombre}</span><span class="badge-susp">SUSP</span><span style="font-size:11px;color:var(--gt);flex:1">${s.motivo.join(', ')}</span></div>`; }).join('')
+        : '<p style="font-size:13px;color:var(--gt);margin-bottom:8px">✓ No hay suspensiones activas.</p>';
+    }
+    const allEl = document.getElementById('discAdminAll');
+    if (!allEl) return;
+    if (!S.tarjetas.length) { allEl.innerHTML = '<p style="font-size:13px;color:var(--gt)">Sin tarjetas registradas.</p>'; return; }
+    allEl.innerHTML = `<table class="mtable"><thead><tr><th>Jugadora</th><th>Equipo</th><th>Tipo</th><th>Fecha</th><th></th></tr></thead><tbody>${S.tarjetas.map((t, i) => {
+      const eq = getEq(t.equipoId);
+      const tipoLabel = t.tipo === 'am' ? '<span class="card-am"></span> Amarilla' : t.tipo === 'ro' ? '<span class="card-ro"></span> Roja directa' : '<span class="card-do"></span> 2ª Amarilla';
+      return `<tr><td>${t.jugNombre}</td><td><span class="tdot" style="background:${eq.color}"></span>${eq.nombre}</td><td>${tipoLabel}</td><td>Fecha ${t.nroFecha||'?'}</td><td><button class="bd" onclick="delTarjeta(${i})">✕</button></td></tr>`;
+    }).join('')}</tbody></table>`;
+  }
+  window.delTarjeta = function(idx) {
+    if (!confirm('¿Eliminar esta tarjeta?')) return;
+    S.tarjetas.splice(idx, 1);
+    save(); renderDiscAdmin(); showNotif('Tarjeta eliminada ✓');
+  };
+
+  // ── RENDER PÚBLICO ────────────────────────────────────────────────
+  function renderPos() {
+    const sorted = calcPos().sort((a,b) => b.pts - a.pts || (b.gf-b.gc) - (a.gf-a.gc) || b.gf - a.gf);
+    document.getElementById('tablaBody').innerHTML = sorted.map((s, i) => {
+      const e = getEq(s.id), r = i + 1;
+      const cls = r===1?'p1':r===2?'p2':r===3?'p3':'px';
+      const dg = s.gf - s.gc;
+      return `<tr>
+        <td><span class="pnum ${cls}">${r}</span><span class="tdot" style="background:${e.color}"></span><span style="font-weight:600">${e.nombre}</span></td>
+        <td>${s.pj}</td><td>${s.g}</td><td>${s.e}</td><td>${s.p}</td>
+        <td>${s.gf}</td><td>${s.gc}</td>
+        <td style="font-weight:600;color:${dg>0?'var(--v)':dg<0?'var(--ro)':'var(--gt)'}">${dg>0?'+':''}${dg}</td>
+        <td class="pts">${s.pts}</td>
+      </tr>`;
+    }).join('');
+    const tg  = S.partidos.reduce((a,p) => a + (p.jugado ? p.golesLocal + p.golesVisita : 0), 0);
+    const pj  = S.partidos.filter(p => p.jugado).length;
+    const tam = S.tarjetas.filter(t => t.tipo === 'am').length;
+    const tro = S.tarjetas.filter(t => t.tipo === 'ro' || t.tipo === 'do').length;
+    document.getElementById('stats-sec').innerHTML = `<div class="sgrid">
+      <div class="scard"><div class="snum">${S.equipos.length}</div><div class="slbl">Equipos</div></div>
+      <div class="scard"><div class="snum">${S.jugadoras.length}</div><div class="slbl">Jugadoras</div></div>
+      <div class="scard"><div class="snum">${pj}</div><div class="slbl">Partidos</div></div>
+      <div class="scard"><div class="snum">${tg}</div><div class="slbl">Goles</div></div>
+      <div class="scard"><div class="snum" style="color:#c9a014">${tam}</div><div class="slbl">🟨 Amarillas</div></div>
+      <div class="scard"><div class="snum" style="color:var(--ro)">${tro}</div><div class="slbl">🟥 Rojas</div></div>
+    </div>`;
+  }
+  function calcPos() {
+    return S.equipos.map(e => {
+      let pj=0, g=0, em=0, p=0, gf=0, gc=0;
+      S.partidos.filter(pt => (pt.local===e.id||pt.visita===e.id) && pt.jugado).forEach(pt => {
+        const isL = pt.local === e.id;
+        const mios = isL ? pt.golesLocal : pt.golesVisita;
+        const suyos = isL ? pt.golesVisita : pt.golesLocal;
+        pj++; gf+=mios; gc+=suyos;
+        if (mios > suyos) g++; else if (mios === suyos) em++; else p++;
+      });
+      return { id: e.id, pj, g, e: em, p, gf, gc, pts: g*3+em };
+    });
+  }
+  function renderGol() {
+    const el = document.getElementById('goleadorasList');
+    const tot = {};
+    S.goles.forEach(g => { if (!tot[g.jugId]) tot[g.jugId] = { jugId: g.jugId, jugNombre: g.jugNombre, equipoId: g.equipoId, total: 0 }; tot[g.jugId].total += g.cant; });
+    const sorted = Object.values(tot).sort((a,b) => b.total - a.total);
+    if (!sorted.length) { el.innerHTML = '<p style="color:var(--gt);font-size:13px;text-align:center;padding:28px">Aún no hay goles cargados.</p>'; return; }
+    el.innerHTML = sorted.map((g, i) => {
+      const eq = getEq(g.equipoId), bg = eq ? eq.color : '#888';
+      const ini = g.jugNombre.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase();
+      return `<div class="gitem">
+        <div class="grank ${i<3?'top':''}">${i+1}</div>
+        <div class="gavt" style="background:${bg}">${ini}</div>
+        <div class="ginfo"><div class="gnm">${g.jugNombre}</div><div class="geq">${eq ? eq.nombre : '—'}</div></div>
+        <div style="text-align:right"><div class="gcnt">${g.total}</div><div style="font-size:11px;color:var(--gt)">gol${g.total!==1?'es':''}</div></div>
+      </div>`;
+    }).join('');
+  }
+  function renderFix() {
+    const el = document.getElementById('fixtureContainer');
+    if (!S.partidos.length) { el.innerHTML = '<div style="text-align:center;padding:36px 18px;color:var(--gt)"><div style="font-size:36px;margin-bottom:8px">📅</div><p>Fixture no generado aún.</p></div>'; return; }
+    const fechas = [...new Set(S.partidos.map(p => p.fecha))].sort((a,b) => a-b);
+    el.innerHTML = fechas.map(f => {
+      const ps = S.partidos.filter(p => p.fecha === f);
+      return `<div class="fcard">
+        <div class="fhdr"><span>Fecha ${f}</span><span class="fdate">${fmtFecha(ps[0].fechaStr)}</span></div>
+        ${ps.map(p => {
+          const eL = getEq(p.local), eV = getEq(p.visita);
+          return `<div class="prow">
+            <div class="ta"><span class="tdot" style="background:${eL.color}"></span>${eL.nombre}</div>
+            <div style="text-align:center">
+              ${p.jugado ? `<div class="sbox">${p.golesLocal}<span class="ssep">—</span>${p.golesVisita}</div>` : `<span class="badge bpend">Pendiente</span>`}
+              ${(p.cancha||p.hora) ? `<div class="pinfo">${p.cancha?'🏟 '+p.cancha:''}${p.hora?' · '+p.hora:''}</div>` : ''}
+            </div>
+            <div class="tb"><span class="tdot" style="background:${eV.color}"></span>${eV.nombre}</div>
+          </div>`;
+        }).join('')}
+      </div>`;
+    }).join('');
+  }
+  function renderRes() {
+    const el = document.getElementById('resultadosPorFecha');
+    const jugados = S.partidos.filter(p => p.jugado);
+    if (!jugados.length) { el.innerHTML = '<p style="color:var(--gt);font-size:13px;text-align:center;padding:28px">Aún no hay resultados.</p>'; return; }
+    const fechas = [...new Set(jugados.map(p => p.fecha))].sort((a,b) => a-b);
+    el.innerHTML = fechas.map(f => {
+      const ps = jugados.filter(p => p.fecha === f);
+      return `<div class="res-fecha-wrap">
+        <div class="res-fecha-title">Fecha ${f} — ${fmtFecha(ps[0].fechaStr)}</div>
+        <table class="res-table"><thead><tr><th>Local</th><th>Res.</th><th>Visitante</th><th>Cancha</th><th>Goleadoras</th><th>Tarjetas</th></tr></thead>
+        <tbody>${ps.map(p => {
+          const eL = getEq(p.local), eV = getEq(p.visita);
+          const gstr = S.goles.filter(g => g.partidoId===p.id).map(g => `<span style="font-size:11px;white-space:nowrap"><span class="tdot" style="background:${getEq(g.equipoId).color}"></span>${g.jugNombre}(${g.cant})</span>`).join(' ');
+          const tstr = S.tarjetas.filter(t => t.partidoId===p.id).map(t => `<span style="font-size:11px;white-space:nowrap">${t.tipo==='am'?'🟨':t.tipo==='ro'?'🟥':'🟧'} ${t.jugNombre}</span>`).join(' ');
+          return `<tr>
+            <td><span class="tdot" style="background:${eL.color}"></span><strong>${eL.nombre}</strong></td>
+            <td><span style="font-family:'Barlow Condensed',sans-serif;font-size:17px;font-weight:700">${p.golesLocal}—${p.golesVisita}</span></td>
+            <td><span class="tdot" style="background:${eV.color}"></span><strong>${eV.nombre}</strong></td>
+            <td style="font-size:11px;color:var(--gt)">${p.cancha||'—'}${p.hora?' '+p.hora:''}</td>
+            <td>${gstr||'—'}</td>
+            <td>${tstr||'—'}</td>
+          </tr>`;
+        }).join('')}</tbody></table>
+      </div>`;
+    }).join('');
+  }
+  function renderEqsPub() {
+    const el = document.getElementById('equiposPub'); if (!el) return;
+    if (!S.equipos.length) { el.innerHTML = '<p style="color:var(--gt)">Sin equipos cargados.</p>'; return; }
+    el.innerHTML = S.equipos.map(e => {
+      const jugs = S.jugadoras.filter(j => j.equipoId === e.id).sort((a,b) => (a.dorsal||99)-(b.dorsal||99));
+      return `<div class="ecard">
+        <div class="ecard-hdr" style="background:${e.color};height:12px"></div>
+        <div class="ecard-body">
+          <div class="ecard-nm">${e.nombre}</div>
+          <div class="ecard-cnt">${jugs.length} jugadoras</div>
+          ${jugs.length ? `<div style="margin-top:8px">${jugs.map(j => `<div style="font-size:12px;padding:3px 0;border-bottom:1px solid var(--gr);display:flex;gap:7px;align-items:center"><span style="color:var(--gt);min-width:20px">${j.dorsal||'—'}</span><span style="flex:1">${j.nombre}</span>${j.fnac ? `<span style="color:var(--gt);font-size:10px">${calcEdad(j.fnac)}a</span>` : ''}</div>`).join('')}</div>` : ''}
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderAll() {
+    renderPos(); renderGol(); renderFix(); renderRes(); renderEqsPub(); renderDiscPublic();
+    document.getElementById('torneoNombre').textContent    = S.nombre    || 'Liga Fútbol Femenino GEBA';
+    document.getElementById('torneoTemporada').textContent = S.temporada || 'Temporada 2025';
+  }
+
+  // ── UTILS ─────────────────────────────────────────────────────────
+  function getEq(id) { return S.equipos.find(e => e.id === id) || { nombre: '?', color: '#999' }; }
+  function calcEdad(fnac) {
+    if (!fnac) return null;
+    const hoy = new Date(), nac = new Date(fnac);
+    let edad = hoy.getFullYear() - nac.getFullYear();
+    const m = hoy.getMonth() - nac.getMonth();
+    if (m < 0 || (m === 0 && hoy.getDate() < nac.getDate())) edad--;
+    return edad;
+  }
+  function fmtFecha(str) {
+    if (!str) return '';
+    const [y,m,d] = str.split('-');
+    return `${parseInt(d)} ${['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][parseInt(m)-1]} ${y}`;
+  }
+  function showNotif(msg, err = false) {
+    const el = document.getElementById('notif');
+    el.textContent = msg;
+    el.style.background = err ? 'var(--ro)' : 'var(--vd)';
+    el.classList.add('on');
+    setTimeout(() => el.classList.remove('on'), 3500);
+  }
+
+  // ── BOOT ──────────────────────────────────────────────────────────
+  document.addEventListener('DOMContentLoaded', () => {
+    loadInitial();
+  });
+</script>
+
+<style>
+:root{--v:#1a7a4a;--vl:#22a05e;--vd:#0f4f2e;--am:#f5c518;--bl:#f8f9f4;--gr:#e8ede8;--gt:#6b7c6b;--ro:#c0392b;}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:'Barlow',sans-serif;background:var(--bl);color:#1a2e1a;min-height:100vh;}
+
+/* LOADING */
+#loadingOverlay{position:fixed;inset:0;background:var(--vd);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;}
+#loadingOverlay .spin{width:44px;height:44px;border:4px solid rgba(255,255,255,.2);border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite;}
+#loadingOverlay p{color:rgba(255,255,255,.8);font-size:14px;font-family:'Barlow Condensed',sans-serif;letter-spacing:1px;text-transform:uppercase;}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.hdr{background:var(--vd);color:#fff;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,.3);}
+.hdr-top{background:var(--am);text-align:center;padding:4px;font-family:'Barlow Condensed',sans-serif;font-size:11px;font-weight:700;letter-spacing:2px;color:var(--vd);text-transform:uppercase;}
+.hdr-main{display:flex;align-items:center;justify-content:space-between;padding:10px 18px;gap:10px;}
+.logo-area{display:flex;align-items:center;gap:10px;}
+.logo-ball{width:40px;height:40px;background:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;}
+.logo-text h1{font-family:'Barlow Condensed',sans-serif;font-size:18px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:#fff;line-height:1.1;}
+.logo-text p{font-size:10px;color:rgba(255,255,255,.6);letter-spacing:1px;text-transform:uppercase;}
+.abtn{background:transparent;border:1.5px solid rgba(255,255,255,.4);color:rgba(255,255,255,.8);padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer;transition:all .2s;white-space:nowrap;}
+.abtn:hover{background:rgba(255,255,255,.1);border-color:#fff;color:#fff;}
+.abtn.on{background:var(--am);border-color:var(--am);color:var(--vd);font-weight:600;}
+
+/* Firebase badge */
+.fb-badge{display:flex;align-items:center;gap:5px;font-size:10px;color:rgba(255,255,255,.5);padding:3px 8px;border:1px solid rgba(255,255,255,.15);border-radius:4px;}
+.fb-dot{width:6px;height:6px;border-radius:50%;background:#4caf50;animation:pulse 2s infinite;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+.tabs-nav{background:var(--v);display:flex;overflow-x:auto;scrollbar-width:none;}
+.tabs-nav::-webkit-scrollbar{display:none;}
+.tbtn{background:transparent;border:none;color:rgba(255,255,255,.65);padding:10px 14px;font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;cursor:pointer;border-bottom:3px solid transparent;white-space:nowrap;transition:all .2s;}
+.tbtn:hover{color:#fff;}.tbtn.on{color:var(--am);border-bottom-color:var(--am);}
+
+.tab-panel{display:none;}.tab-panel.on{display:block;}
+.sec{padding:18px;}
+.sec-title{font-family:'Barlow Condensed',sans-serif;font-size:19px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--vd);border-left:4px solid var(--am);padding-left:10px;margin-bottom:14px;}
+
+.tpos{width:100%;border-collapse:collapse;font-size:13px;}
+.tpos thead tr{background:var(--vd);color:#fff;}
+.tpos thead th{padding:8px 6px;font-family:'Barlow Condensed',sans-serif;font-weight:700;letter-spacing:.5px;text-align:center;font-size:12px;}
+.tpos thead th:first-child{text-align:left;padding-left:12px;}
+.tpos tbody tr{border-bottom:1px solid var(--gr);transition:background .15s;}
+.tpos tbody tr:hover{background:rgba(26,122,74,.04);}
+.tpos td{padding:8px 6px;text-align:center;}
+.tpos td:first-child{text-align:left;padding-left:12px;}
+.pnum{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;font-weight:700;font-size:10px;margin-right:5px;}
+.p1{background:var(--am);color:var(--vd);}.p2{background:#c0c0c0;color:#333;}.p3{background:#cd7f32;color:#fff;}.px{background:var(--gr);color:var(--gt);}
+.pts{font-weight:700;color:var(--vd);font-size:14px;}
+.tdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle;}
+
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;margin-bottom:16px;}
+.scard{background:#fff;border:1px solid var(--gr);border-radius:10px;padding:12px;text-align:center;}
+.snum{font-family:'Barlow Condensed',sans-serif;font-size:28px;font-weight:800;color:var(--v);line-height:1;}
+.slbl{font-size:10px;color:var(--gt);margin-top:3px;text-transform:uppercase;letter-spacing:.5px;}
+
+.glist{display:flex;flex-direction:column;gap:8px;}
+.gitem{display:flex;align-items:center;gap:10px;padding:10px 12px;background:#fff;border:1px solid var(--gr);border-radius:8px;}
+.grank{font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:800;color:var(--gr);min-width:26px;}
+.grank.top{color:var(--am);}
+.gavt{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;color:#fff;flex-shrink:0;}
+.ginfo{flex:1;}.gnm{font-weight:600;font-size:14px;}.geq{font-size:11px;color:var(--gt);}
+.gcnt{font-family:'Barlow Condensed',sans-serif;font-size:26px;font-weight:800;color:var(--vd);}
+
+.card-am{display:inline-block;width:11px;height:15px;background:#f5c518;border-radius:2px;vertical-align:middle;margin:0 1px;}
+.card-ro{display:inline-block;width:11px;height:15px;background:#c0392b;border-radius:2px;vertical-align:middle;margin:0 1px;}
+.card-do{display:inline-block;width:11px;height:15px;background:linear-gradient(to right,#f5c518 50%,#c0392b 50%);border-radius:2px;vertical-align:middle;margin:0 1px;}
+.badge-susp{display:inline-flex;align-items:center;gap:4px;background:#fde8e8;color:var(--ro);border:1px solid #f5c6c6;border-radius:4px;padding:2px 6px;font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;}
+.badge-ok{display:inline-flex;align-items:center;gap:4px;background:#d4edda;color:#155724;border:1px solid #c3e6cb;border-radius:4px;padding:2px 7px;font-size:10px;font-weight:700;}
+.susp-banner{background:#fde8e8;border:1px solid #f5c6c6;border-radius:8px;padding:12px 14px;margin-bottom:14px;}
+.susp-banner h4{font-size:13px;font-weight:700;color:var(--ro);margin-bottom:8px;display:flex;align-items:center;gap:6px;}
+.susp-item{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #f5c6c6;font-size:13px;}
+.susp-item:last-child{border-bottom:none;}
+.disp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:20px;}
+.disp-card{background:#fff;border:1px solid var(--gr);border-radius:10px;overflow:hidden;}
+.disp-card-hdr{padding:10px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--gr);}
+.disp-card-hdr strong{font-size:14px;font-weight:700;flex:1;}
+.disp-table{width:100%;border-collapse:collapse;font-size:12px;}
+.disp-table td{padding:7px 12px;border-bottom:1px solid var(--gr);}
+.disp-table tr:last-child td{border-bottom:none;}
+
+.fcard{background:#fff;border:1px solid var(--gr);border-radius:10px;overflow:hidden;margin-bottom:14px;}
+.fhdr{background:var(--vd);color:#fff;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;}
+.fhdr span{font-family:'Barlow Condensed',sans-serif;font-size:15px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;}
+.fdate{font-size:11px;opacity:.7;}
+.prow{display:flex;align-items:center;padding:10px 12px;border-bottom:1px solid var(--gr);gap:6px;flex-wrap:wrap;}
+.prow:last-child{border-bottom:none;}
+.ta{flex:1;text-align:right;font-weight:600;font-size:13px;}
+.tb{flex:1;text-align:left;font-weight:600;font-size:13px;}
+.sbox{display:flex;align-items:center;gap:4px;padding:5px 9px;background:var(--vd);border-radius:6px;color:#fff;font-family:'Barlow Condensed',sans-serif;font-size:18px;font-weight:700;min-width:56px;justify-content:center;}
+.ssep{opacity:.3;}
+.pinfo{font-size:10px;color:var(--gt);text-align:center;margin-top:2px;}
+.badge{display:inline-block;padding:2px 7px;border-radius:20px;font-size:10px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;}
+.bpend{background:#fff3cd;color:#856404;}
+.res-fecha-wrap{margin-bottom:20px;}
+.res-fecha-title{font-family:'Barlow Condensed',sans-serif;font-size:16px;font-weight:700;text-transform:uppercase;color:var(--vd);margin-bottom:8px;padding:6px 0;border-bottom:2px solid var(--am);}
+.res-table{width:100%;border-collapse:collapse;font-size:12px;}
+.res-table th{background:var(--gr);padding:6px 9px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--gt);}
+.res-table td{padding:7px 9px;border-bottom:1px solid var(--gr);}
+.res-table td:nth-child(2){text-align:center;font-weight:700;font-family:'Barlow Condensed',sans-serif;font-size:16px;}
+.egrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;}
+.ecard{background:#fff;border:1px solid var(--gr);border-radius:10px;overflow:hidden;}
+.ecard-hdr{height:10px;}.ecard-body{padding:12px;}
+.ecard-nm{font-weight:700;font-size:15px;margin-bottom:3px;}.ecard-cnt{font-size:12px;color:var(--gt);}
+
+/* ADMIN */
+.apanel{padding:16px;}
+.alogin{max-width:380px;margin:36px auto;background:#fff;border:1px solid var(--gr);border-radius:12px;padding:26px;text-align:center;}
+.alogin h3{font-family:'Barlow Condensed',sans-serif;font-size:21px;font-weight:700;color:var(--vd);margin-bottom:5px;text-transform:uppercase;}
+.alogin p{font-size:13px;color:var(--gt);margin-bottom:18px;}
+.fg{margin-bottom:12px;text-align:left;}
+.fg label{font-size:11px;font-weight:600;color:var(--gt);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px;}
+.fg input,.fg select{width:100%;padding:8px 11px;border:1px solid var(--gr);border-radius:7px;font-size:13px;font-family:'Barlow',sans-serif;outline:none;transition:border .2s;background:var(--bl);}
+.fg input:focus,.fg select:focus{border-color:var(--v);}
+.bp{background:var(--v);color:#fff;border:none;padding:9px 18px;border-radius:7px;font-family:'Barlow Condensed',sans-serif;font-size:15px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;cursor:pointer;width:100%;transition:background .2s;}
+.bp:hover{background:var(--vd);}
+.bs{background:transparent;color:var(--v);border:1.5px solid var(--v);padding:7px 14px;border-radius:7px;font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:700;text-transform:uppercase;cursor:pointer;transition:all .2s;}
+.bs:hover{background:var(--v);color:#fff;}
+.bd{background:transparent;color:var(--ro);border:1px solid var(--ro);padding:4px 8px;border-radius:5px;font-size:11px;cursor:pointer;transition:all .2s;}
+.bd:hover{background:var(--ro);color:#fff;}
+.bsm{background:var(--v);color:#fff;border:none;padding:5px 9px;border-radius:5px;font-size:11px;font-family:'Barlow',sans-serif;font-weight:600;cursor:pointer;}
+.bsm:hover{background:var(--vd);}
+.berr{color:var(--ro);font-size:12px;margin-top:6px;}
+.bok{color:var(--v);font-size:12px;margin-top:6px;font-weight:600;}
+.atabs{display:flex;gap:4px;margin-bottom:18px;flex-wrap:wrap;}
+.atab{background:#fff;border:1px solid var(--gr);color:var(--gt);padding:6px 11px;border-radius:6px;font-size:12px;cursor:pointer;transition:all .2s;}
+.atab.on{background:var(--v);color:#fff;border-color:var(--v);font-weight:600;}
+.acont{display:none;}.acont.on{display:block;}
+.iform{background:rgba(26,122,74,.05);border:1px dashed var(--vl);border-radius:8px;padding:12px;margin-bottom:14px;}
+.iform h4{font-size:12px;font-weight:600;color:var(--vd);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;}
+.frow{display:flex;gap:8px;flex-wrap:wrap;}
+.frow .fg{flex:1;min-width:100px;margin-bottom:0;}
+.mtable{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;}
+.mtable th{background:var(--gr);padding:6px 9px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--gt);}
+.mtable td{padding:6px 9px;border-bottom:1px solid var(--gr);}
+.pbox{background:#fff;border:1px solid var(--gr);border-radius:10px;padding:14px;margin-bottom:10px;}
+.pbox h4{font-size:13px;font-weight:600;margin-bottom:8px;color:var(--vd);}
+.einput{border:1px solid var(--v);border-radius:5px;padding:3px 7px;font-size:13px;font-family:'Barlow',sans-serif;width:140px;}
+
+/* MODAL */
+.moverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:200;align-items:center;justify-content:center;}
+.moverlay.on{display:flex;}
+.modal{background:#fff;border-radius:12px;padding:20px;width:94%;max-width:500px;max-height:94vh;overflow-y:auto;}
+.modal h3{font-family:'Barlow Condensed',sans-serif;font-size:19px;font-weight:700;color:var(--vd);text-transform:uppercase;margin-bottom:12px;}
+.macts{display:flex;gap:8px;margin-top:14px;}
+.macts .bp{flex:1;}
+.bcancel{background:transparent;border:1px solid var(--gr);color:var(--gt);padding:9px 14px;border-radius:7px;font-size:13px;cursor:pointer;flex:1;}
+.bcancel:hover{background:var(--gr);}
+.sinps{display:flex;align-items:center;gap:10px;margin:12px 0;}
+.sinps .tlbl{flex:1;font-weight:600;font-size:13px;text-align:center;}
+.sinps input[type=number]{width:55px;padding:7px;text-align:center;font-size:22px;font-weight:700;border:2px solid var(--gr);border-radius:8px;font-family:'Barlow Condensed',sans-serif;}
+.sinps input[type=number]:focus{border-color:var(--v);outline:none;}
+.msec{border-top:1px solid var(--gr);padding-top:10px;margin-top:10px;}
+.msec-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--gt);margin-bottom:8px;}
+.gadd{display:flex;gap:5px;align-items:flex-end;margin-bottom:6px;flex-wrap:wrap;}
+.gadd select,.gadd input{font-size:12px;padding:5px 7px;border:1px solid var(--gr);border-radius:5px;font-family:'Barlow',sans-serif;}
+.gadd select{flex:1;min-width:120px;}
+.gadd input[type=number]{width:48px;text-align:center;}
+.gchips{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:4px;}
+.gchip{padding:3px 7px 3px 9px;border-radius:20px;font-size:11px;display:flex;align-items:center;gap:5px;color:#fff;}
+.gchip button{background:none;border:none;color:rgba(255,255,255,.8);cursor:pointer;font-size:13px;line-height:1;padding:0;}
+.chip-gol{background:var(--v);}.chip-am{background:#c9a014;}.chip-ro{background:var(--ro);}
+.t-btns{display:flex;gap:5px;flex-wrap:wrap;}
+.btn-am{background:#f5c518;color:#7a5a00;border:none;padding:5px 10px;border-radius:5px;font-size:11px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:4px;}
+.btn-am:hover{background:#e0b214;}
+.btn-ro{background:var(--ro);color:#fff;border:none;padding:5px 10px;border-radius:5px;font-size:11px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:4px;}
+.btn-ro:hover{background:#a93226;}
+
+/* NOTIF */
+.notif{display:none;position:fixed;bottom:18px;right:18px;background:var(--vd);color:#fff;padding:11px 16px;border-radius:8px;font-size:13px;font-weight:600;z-index:999;max-width:280px;}
+.notif.on{display:block;animation:sli .3s ease;}
+@keyframes sli{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+
+@media(max-width:480px){.hdr-main{padding:8px 12px;}.logo-text h1{font-size:14px;}.sec{padding:12px;}.ta,.tb{font-size:11px;}}
+</style>
+</head>
+<body>
+
+<!-- LOADING OVERLAY -->
+<div id="loadingOverlay">
+  <div class="spin"></div>
+  <p>Conectando con Firebase...</p>
+</div>
+
+<div class="hdr">
+  <div class="hdr-top">⚽ Club Germán de Buenos Aires — Sede GEBA ⚽</div>
+  <div class="hdr-main">
+    <div class="logo-area">
+      <div class="logo-ball">⚽</div>
+      <div class="logo-text">
+        <h1 id="torneoNombre">Liga Fútbol Femenino GEBA</h1>
+        <p id="torneoTemporada">Temporada 2025</p>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div class="fb-badge"><div class="fb-dot"></div>En vivo</div>
+      <button class="abtn" id="adminToggleBtn" onclick="toggleAdmin()">⚙ Admin</button>
+    </div>
+  </div>
+</div>
+
+<div class="tabs-nav">
+  <button class="tbtn on"  onclick="showTab('pos',this)">🏆 Posiciones</button>
+  <button class="tbtn" onclick="showTab('gol',this)">⚽ Goleadoras</button>
+  <button class="tbtn" onclick="showTab('disc',this)">🟨 Disciplina</button>
+  <button class="tbtn" onclick="showTab('fix',this)">📅 Fixture</button>
+  <button class="tbtn" onclick="showTab('res',this)">📊 Resultados</button>
+  <button class="tbtn" onclick="showTab('eqs',this)">👕 Equipos</button>
+</div>
+
+<div>
+  <div id="tab-pos" class="tab-panel on">
+    <div class="sec">
+      <div class="sec-title">Tabla de Posiciones</div>
+      <div id="suspBannerPos"></div>
+      <div style="overflow-x:auto"><table class="tpos"><thead><tr>
+        <th style="min-width:130px">Equipo</th>
+        <th title="Partidos Jugados">PJ</th><th title="Ganados">G</th>
+        <th title="Empatados">E</th><th title="Perdidos">P</th>
+        <th title="Goles a Favor">GF</th><th title="Goles en Contra">GC</th>
+        <th title="Diferencia">DG</th><th>Pts</th>
+      </tr></thead><tbody id="tablaBody"></tbody></table></div>
+    </div>
+    <div class="sec" style="padding-top:0" id="stats-sec"></div>
+  </div>
+  <div id="tab-gol" class="tab-panel"><div class="sec"><div class="sec-title">Tabla de Goleadoras</div><div class="glist" id="goleadorasList"></div></div></div>
+  <div id="tab-disc" class="tab-panel"><div class="sec"><div class="sec-title">Disciplina</div><div id="discSuspendidas"></div><div class="sec-title" style="font-size:16px;margin-top:8px">Tarjetas por jugadora</div><div id="discTabla"></div></div></div>
+  <div id="tab-fix" class="tab-panel"><div class="sec"><div class="sec-title">Fixture del Torneo</div><div id="fixtureContainer"></div></div></div>
+  <div id="tab-res" class="tab-panel"><div class="sec"><div class="sec-title">Resultados por Fecha</div><div id="resultadosPorFecha"></div></div></div>
+  <div id="tab-eqs" class="tab-panel"><div class="sec"><div class="sec-title">Equipos del Torneo</div><div class="egrid" id="equiposPub"></div></div></div>
+</div>
+
+<!-- ADMIN PANEL -->
+<div id="adminPanel" style="display:none;border-top:3px solid var(--am);">
+  <div id="adminLogin" class="apanel">
+    <div class="alogin">
+      <div style="font-size:38px;margin-bottom:8px">🔐</div>
+      <h3>Acceso Administradores</h3>
+      <p>Cada organizador tiene su propio acceso.</p>
+      <div class="fg"><label>Usuario</label>
+        <select id="loginUser">
+          <option value="">Seleccionar...</option>
+          <option value="org1">Organizador 1</option>
+          <option value="org2">Organizador 2</option>
+          <option value="org3">Organizador 3</option>
+          <option value="org4">Organizador 4</option>
+        </select>
+      </div>
+      <div class="fg"><label>Contraseña</label><input type="password" id="loginPass" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()"></div>
+      <button class="bp" onclick="doLogin()">Ingresar</button>
+      <div class="berr" id="loginError"></div>
+      <div style="margin-top:14px;padding:10px;background:rgba(26,122,74,.07);border-radius:6px;font-size:11px;color:var(--gt);text-align:left">
+        <strong>Contraseñas iniciales:</strong><br><br>
+        Org 1: <strong>geba01</strong> &nbsp;|&nbsp; Org 2: <strong>geba02</strong><br>
+        Org 3: <strong>geba03</strong> &nbsp;|&nbsp; Org 4: <strong>geba04</strong>
+      </div>
+    </div>
+  </div>
+
+  <div id="adminDash" style="display:none">
+    <div style="background:var(--vd);color:#fff;padding:11px 16px;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="font-family:'Barlow Condensed',sans-serif;font-size:15px;font-weight:700">Panel de Administración</div>
+        <div style="font-size:11px;opacity:.7" id="adminLbl"></div>
+      </div>
+      <button onclick="doLogout()" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.3);color:#fff;padding:5px 11px;border-radius:6px;font-size:12px;cursor:pointer">Cerrar sesión</button>
+    </div>
+    <div class="apanel">
+      <div class="atabs">
+        <button class="atab on" onclick="showATab('a-eq',this)">👕 Equipos</button>
+        <button class="atab" onclick="showATab('a-jug',this)">👤 Jugadoras</button>
+        <button class="atab" onclick="showATab('a-fix',this)">📅 Fixture</button>
+        <button class="atab" onclick="showATab('a-res',this)">⚽ Resultados</button>
+        <button class="atab" onclick="showATab('a-disc',this)">🟨 Disciplina</button>
+        <button class="atab" onclick="showATab('a-cfg',this)">⚙ Ajustes</button>
+      </div>
+
+      <div id="a-eq" class="acont on">
+        <div class="iform"><h4>➕ Nuevo Equipo</h4>
+          <div class="frow">
+            <div class="fg"><label>Nombre</label><input type="text" id="nEq" placeholder="Las Panteras" onkeydown="if(event.key==='Enter')addEq()"></div>
+            <div class="fg" style="max-width:90px"><label>Color</label><input type="color" id="cEq" value="#1a7a4a" style="width:100%;height:36px;padding:2px;border-radius:6px;border:1px solid var(--gr)"></div>
+          </div>
+          <button class="bp" style="margin-top:10px;width:auto;padding:7px 18px" onclick="addEq()">Agregar Equipo</button>
+        </div>
+        <div id="eqAdminList"></div>
+      </div>
+
+      <div id="a-jug" class="acont">
+        <div class="iform"><h4>➕ Nueva Jugadora</h4>
+          <div class="frow">
+            <div class="fg"><label>Nombre completo</label><input type="text" id="nJug" placeholder="Nombre Apellido"></div>
+            <div class="fg" style="max-width:80px"><label>Dorsal</label><input type="number" id="dJug" placeholder="#" min="1" max="99"></div>
+            <div class="fg"><label>Equipo</label><select id="eJug"></select></div>
+          </div>
+          <div class="frow" style="margin-top:8px">
+            <div class="fg"><label>N° de Documento (DNI)</label><input type="text" id="dniJug" placeholder="Ej: 45123456"></div>
+            <div class="fg"><label>Fecha de Nacimiento</label><input type="date" id="fnacJug"></div>
+          </div>
+          <button class="bp" style="margin-top:10px;width:auto;padding:7px 18px" onclick="addJug()">Agregar Jugadora</button>
+        </div>
+        <div id="jugAdminList"></div>
+      </div>
+
+      <div id="a-fix" class="acont">
+        <div style="background:#fff;border:1px solid var(--gr);border-radius:10px;padding:16px;margin-bottom:14px;">
+          <div style="font-family:'Barlow Condensed',sans-serif;font-size:17px;font-weight:700;text-transform:uppercase;color:var(--vd);margin-bottom:8px;">🗓 Generar Fixture</div>
+          <p style="font-size:12px;color:var(--gt);margin-bottom:10px">Equipos: <strong id="eqCount">0</strong> → <span id="rondasInfo">—</span></p>
+          <div class="frow">
+            <div class="fg"><label>Fecha de inicio</label><input type="date" id="fxFecha"></div>
+            <div class="fg" style="max-width:130px"><label>Días entre fechas</label><input type="number" id="fxDias" value="7" min="1" max="60"></div>
+          </div>
+          <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="bp" style="width:auto;padding:7px 16px" onclick="genFix()">⚡ Generar</button>
+            <button class="bs" onclick="if(confirm('¿Borrar el fixture?')){S.partidos=[];save();renderFix();renderFixAdmin();showNotif('Fixture borrado');}">🗑 Borrar</button>
+          </div>
+        </div>
+        <div id="fixAdminList"></div>
+      </div>
+
+      <div id="a-res" class="acont">
+        <p style="font-size:13px;color:var(--gt);margin-bottom:10px">Cargá marcador, goleadoras y tarjetas de cada partido.</p>
+        <div id="resAdminList"></div>
+      </div>
+
+      <div id="a-disc" class="acont">
+        <div style="background:#fff;border:1px solid var(--gr);border-radius:10px;padding:16px;margin-bottom:14px;">
+          <div style="font-family:'Barlow Condensed',sans-serif;font-size:17px;font-weight:700;text-transform:uppercase;color:var(--vd);margin-bottom:8px;">⚙ Configuración de sanciones</div>
+          <div class="frow">
+            <div class="fg"><label>Amarillas para suspensión</label><input type="number" id="cfgAm" value="3" min="1" max="10"></div>
+            <div class="fg"><label>Fechas por roja directa</label><input type="number" id="cfgRo" value="1" min="1" max="5"></div>
+          </div>
+          <button class="bp" style="width:auto;padding:7px 16px;margin-top:10px" onclick="saveCfgDisc()">Guardar</button>
+        </div>
+        <div style="font-family:'Barlow Condensed',sans-serif;font-size:15px;font-weight:700;text-transform:uppercase;color:var(--vd);margin-bottom:10px;border-left:4px solid var(--am);padding-left:8px">Suspensiones activas</div>
+        <div id="discAdminSusp"></div>
+        <div style="font-family:'Barlow Condensed',sans-serif;font-size:15px;font-weight:700;text-transform:uppercase;color:var(--vd);margin:14px 0 10px;border-left:4px solid var(--am);padding-left:8px">Todas las tarjetas</div>
+        <div id="discAdminAll"></div>
+      </div>
+
+      <div id="a-cfg" class="acont">
+        <div class="pbox">
+          <h4>✏️ Nombre del torneo</h4>
+          <div class="fg"><label>Título</label><input type="text" id="cfgNombre"></div>
+          <div class="fg"><label>Subtítulo</label><input type="text" id="cfgTemp"></div>
+          <button class="bp" style="width:auto;padding:7px 16px;margin-top:4px" onclick="saveNombre()">Guardar nombre</button>
+        </div>
+        <div class="pbox">
+          <h4>🔑 Cambiar mi contraseña</h4>
+          <div class="fg"><label>Contraseña actual</label><input type="password" id="pAct"></div>
+          <div class="fg"><label>Nueva contraseña</label><input type="password" id="pNueva"></div>
+          <div class="fg"><label>Confirmar nueva</label><input type="password" id="pConf"></div>
+          <button class="bp" style="width:auto;padding:7px 16px" onclick="changePass()">Guardar contraseña</button>
+          <div id="passMsg"></div>
+        </div>
+        <div class="pbox">
+          <h4>🏟 Canchas</h4>
+          <div style="display:flex;gap:6px;margin-bottom:8px">
+            <input type="text" id="nCancha" placeholder="Nombre de la cancha" style="flex:1;padding:7px 10px;border:1px solid var(--gr);border-radius:6px;font-size:13px;font-family:'Barlow',sans-serif;outline:none;">
+            <button class="bsm" onclick="addCancha()">+ Agregar</button>
+          </div>
+          <div id="canchasList"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL RESULTADO -->
+<div class="moverlay" id="mRes">
+  <div class="modal">
+    <h3>⚽ Cargar Resultado</h3>
+    <div id="mInfo" style="font-size:12px;color:var(--gt);margin-bottom:8px"></div>
+    <div class="frow" style="margin-bottom:10px">
+      <div class="fg"><label>Cancha</label><select id="mCancha"></select></div>
+      <div class="fg" style="max-width:120px"><label>Horario</label><input type="time" id="mHora"></div>
+    </div>
+    <div class="sinps">
+      <div class="tlbl" id="mTA"></div>
+      <input type="number" id="gA" min="0" max="30" value="0">
+      <div style="font-size:16px;color:var(--gt);font-weight:700">–</div>
+      <input type="number" id="gB" min="0" max="30" value="0">
+      <div class="tlbl" id="mTB"></div>
+    </div>
+    <div class="msec">
+      <div class="msec-title">⚽ Goleadoras</div>
+      <div><div style="font-size:11px;font-weight:600;color:var(--vd);margin-bottom:4px" id="glblA"></div>
+        <div class="gadd"><select id="jselA"></select><input type="number" id="cgA" value="1" min="1" max="10"><button class="bsm" onclick="addChip('gol','a')">+ Gol</button></div>
+        <div class="gchips" id="chipsGolA"></div></div>
+      <div style="margin-top:8px"><div style="font-size:11px;font-weight:600;color:var(--vd);margin-bottom:4px" id="glblB"></div>
+        <div class="gadd"><select id="jselB"></select><input type="number" id="cgB" value="1" min="1" max="10"><button class="bsm" onclick="addChip('gol','b')">+ Gol</button></div>
+        <div class="gchips" id="chipsGolB"></div></div>
+    </div>
+    <div class="msec">
+      <div class="msec-title">🟨 Amarillas</div>
+      <div class="frow">
+        <div style="flex:1"><div style="font-size:11px;font-weight:600;color:var(--vd);margin-bottom:4px" id="amLblA"></div>
+          <div class="gadd"><select id="jselAmA"></select><button class="btn-am" onclick="addChip('am','a')"><span class="card-am"></span>Amarilla</button></div>
+          <div class="gchips" id="chipsAmA"></div></div>
+        <div style="flex:1"><div style="font-size:11px;font-weight:600;color:var(--vd);margin-bottom:4px" id="amLblB"></div>
+          <div class="gadd"><select id="jselAmB"></select><button class="btn-am" onclick="addChip('am','b')"><span class="card-am"></span>Amarilla</button></div>
+          <div class="gchips" id="chipsAmB"></div></div>
+      </div>
+    </div>
+    <div class="msec">
+      <div class="msec-title">🟥 Rojas</div>
+      <div class="frow">
+        <div style="flex:1"><div style="font-size:11px;font-weight:600;color:var(--vd);margin-bottom:4px" id="roLblA"></div>
+          <div class="gadd"><select id="jselRoA"></select>
+            <div class="t-btns"><button class="btn-ro" onclick="addChip('ro','a')"><span class="card-ro"></span>Directa</button>
+            <button class="btn-am" style="background:#e67e22;color:#fff" onclick="addChip('do','a')"><span class="card-do"></span>2ª Am.</button></div></div>
+          <div class="gchips" id="chipsRoA"></div></div>
+        <div style="flex:1"><div style="font-size:11px;font-weight:600;color:var(--vd);margin-bottom:4px" id="roLblB"></div>
+          <div class="gadd"><select id="jselRoB"></select>
+            <div class="t-btns"><button class="btn-ro" onclick="addChip('ro','b')"><span class="card-ro"></span>Directa</button>
+            <button class="btn-am" style="background:#e67e22;color:#fff" onclick="addChip('do','b')"><span class="card-do"></span>2ª Am.</button></div></div>
+          <div class="gchips" id="chipsRoB"></div></div>
+      </div>
+    </div>
+    <div class="macts">
+      <button class="bcancel" onclick="closeModal('mRes')">Cancelar</button>
+      <button class="bp" onclick="saveRes()">Guardar Resultado</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL EDITAR PARTIDO -->
+<div class="moverlay" id="mEdit">
+  <div class="modal">
+    <h3>✏️ Editar Partido</h3>
+    <div class="fg"><label>Fecha del partido</label><input type="date" id="eFecha"></div>
+    <div class="frow">
+      <div class="fg"><label>Cancha</label><select id="eCancha"></select></div>
+      <div class="fg" style="max-width:120px"><label>Horario</label><input type="time" id="eHora"></div>
+    </div>
+    <div class="frow">
+      <div class="fg"><label>Equipo Local</label><select id="eLocal"></select></div>
+      <div class="fg"><label>Equipo Visitante</label><select id="eVisita"></select></div>
+    </div>
+    <div class="macts">
+      <button class="bcancel" onclick="closeModal('mEdit')">Cancelar</button>
+      <button class="bp" onclick="saveEditPartido()">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<div class="notif" id="notif"></div>
+
+</body>
+</html>
