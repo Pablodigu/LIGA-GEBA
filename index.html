@@ -33,6 +33,7 @@
   //                         partidos, goles, tarjetas, canchas, discCfg }
   const STATE_DOC = doc(db, "torneos", "geba");
   const PASS_DOC  = doc(db, "config",  "passwords");
+  const DELEG_DOC = doc(db, "config",  "delegados");
 
   // ── DEFAULT STATE ────────────────────────────────────────────────
   function defaultState() {
@@ -49,6 +50,8 @@
 
   let S = defaultState();
   let passwords = { org1:"geba01", org2:"geba02", org3:"geba03", org4:"geba04" };
+  let delegados = {}; // { [equipoId]: { nombre, password } }
+  let session = null; // { type: "admin"|"delegado", id, equipoId? }
   let saveTimer = null;
   let mPid = null, gmCh = {gol:{a:[],b:[]},am:{a:[],b:[]},ro:{a:[],b:[]},do:{a:[],b:[]}};
   let mEditPid = null;
@@ -72,6 +75,9 @@
   async function savePasswords() {
     try { await setDoc(PASS_DOC, passwords); } catch(e) {}
   }
+  async function saveDelegados() {
+    try { await setDoc(DELEG_DOC, delegados); } catch(e) {}
+  }
 
   // ── FIREBASE LOAD + REALTIME LISTENER ───────────────────────────
   async function loadInitial() {
@@ -81,6 +87,10 @@
       const pSnap = await getDoc(PASS_DOC);
       if (pSnap.exists()) passwords = pSnap.data();
       else await setDoc(PASS_DOC, passwords);
+      // delegados
+      const dSnap = await getDoc(DELEG_DOC);
+      if (dSnap.exists()) delegados = dSnap.data();
+      else await setDoc(DELEG_DOC, {});
 
       // state
       const sSnap = await getDoc(STATE_DOC);
@@ -110,8 +120,19 @@
     onSnapshot(PASS_DOC, (snap) => {
       if (snap.exists()) passwords = snap.data();
     });
+    onSnapshot(DELEG_DOC, (snap) => {
+      if (snap.exists()) delegados = snap.data();
+    });
   }
 
+  function updateLoginPlaceholder() {}
+  function populateDelegadasSelect() {
+    const og = document.getElementById('delegadasOptgroup'); if (!og) return;
+    og.innerHTML = Object.entries(delegados).map(([eid, d]) => {
+      const eq = S.equipos.find(e => e.id === eid);
+      return eq ? `<option value="${eid}">Delegada — ${eq.nombre}</option>` : '';
+    }).join('');
+  }
   function showLoading(show) {
     document.getElementById('loadingOverlay').style.display = show ? 'flex' : 'none';
   }
@@ -132,6 +153,7 @@
     if (t === 'a-fix') startFixInfo();
     if (t === 'a-cfg') loadCfgForm();
     if (t === 'a-disc') renderDiscAdmin();
+    if (t === 'a-deleg') renderDelegadosAdmin();
   };
 
   // ── AUTH ─────────────────────────────────────────────────────────
@@ -141,7 +163,8 @@
     if (p.style.display === 'none') {
       p.style.display = 'block'; b.classList.add('on');
       p.scrollIntoView({ behavior: 'smooth' });
-      if (S.adminLoggedIn) showDash();
+      if (session && session.type === 'admin') showDash();
+      else if (session && session.type === 'delegado') showDelegadoDash();
     } else {
       p.style.display = 'none'; b.classList.remove('on');
     }
@@ -151,21 +174,47 @@
     const pw = document.getElementById('loginPass').value;
     document.getElementById('loginError').textContent = '';
     if (!u) { document.getElementById('loginError').textContent = 'Seleccioná un usuario.'; return; }
-    if (passwords[u] !== pw) { document.getElementById('loginError').textContent = 'Contraseña incorrecta.'; return; }
-    S.adminLoggedIn = u;
-    showDash(); showNotif('Bienvenida, ' + USER_NAMES[u] + ' 👋');
+    // Check admin
+    if (passwords[u] !== undefined) {
+      if (passwords[u] !== pw) { document.getElementById('loginError').textContent = 'Contraseña incorrecta.'; return; }
+      session = { type: 'admin', id: u };
+      S.adminLoggedIn = u;
+      showDash(); showNotif('Bienvenida, ' + USER_NAMES[u] + ' 👋');
+      return;
+    }
+    // Check delegado
+    const deleg = delegados[u];
+    if (deleg) {
+      if (deleg.password !== pw) { document.getElementById('loginError').textContent = 'Contraseña incorrecta.'; return; }
+      session = { type: 'delegado', id: u, equipoId: u };
+      showDelegadoDash(); showNotif('Bienvenida, delegada de ' + (S.equipos.find(e=>e.id===u)?.nombre||'tu equipo') + ' 👋');
+      return;
+    }
+    document.getElementById('loginError').textContent = 'Usuario no encontrado.';
   };
   window.doLogout = function() {
-    S.adminLoggedIn = null;
+    session = null; S.adminLoggedIn = null;
     document.getElementById('adminDash').style.display = 'none';
+    document.getElementById('delegadoDash').style.display = 'none';
     document.getElementById('adminLogin').style.display = 'block';
     document.getElementById('loginPass').value = '';
+    document.getElementById('loginUser').value = '';
   };
   function showDash() {
     document.getElementById('adminLogin').style.display = 'none';
+    document.getElementById('delegadoDash').style.display = 'none';
     document.getElementById('adminDash').style.display = 'block';
     document.getElementById('adminLbl').textContent = 'Sesión: ' + USER_NAMES[S.adminLoggedIn];
     renderEqAdmin(); renderJugAdmin(); renderFixAdmin(); startFixInfo();
+    renderDelegadosAdmin();
+  }
+  function showDelegadoDash() {
+    document.getElementById('adminLogin').style.display = 'none';
+    document.getElementById('adminDash').style.display = 'none';
+    document.getElementById('delegadoDash').style.display = 'block';
+    const eq = S.equipos.find(e => e.id === session.equipoId);
+    document.getElementById('delegadoLbl').textContent = 'Delegada de: ' + (eq ? eq.nombre : '');
+    renderDelegadoJugadoras();
   }
 
   // ── CONFIG ───────────────────────────────────────────────────────
@@ -732,14 +781,87 @@
         <div class="ecard-body">
           <div class="ecard-nm">${e.nombre}</div>
           <div class="ecard-cnt">${jugs.length} jugadoras</div>
-          ${jugs.length ? `<div style="margin-top:8px">${jugs.map(j => `<div style="font-size:12px;padding:3px 0;border-bottom:1px solid var(--gr);display:flex;gap:7px;align-items:center"><span style="color:var(--gt);min-width:20px">${j.dorsal||'—'}</span><span style="flex:1">${j.nombre}</span>${j.fnac ? `<span style="color:var(--gt);font-size:10px">${calcEdad(j.fnac)}a</span>` : ''}</div>`).join('')}</div>` : ''}
+          ${jugs.length ? `<div style="margin-top:8px">${jugs.map(j => `<div style="font-size:12px;padding:3px 0;border-bottom:1px solid var(--gr);display:flex;gap:7px;align-items:center"><span style="color:var(--gt);min-width:20px">${j.dorsal||'—'}</span><span style="flex:1">${j.nombre}</span></div>`).join('')}</div>` : ''}
         </div>
       </div>`;
     }).join('');
   }
 
+
+  // ── DELEGADOS ─────────────────────────────────────────────────────
+  window.addDelegado = function() {
+    const eid = document.getElementById('delegEq').value;
+    const pw  = document.getElementById('delegPass').value.trim();
+    if (!eid) { showNotif('Seleccioná un equipo'); return; }
+    if (pw.length < 4) { showNotif('La contraseña debe tener al menos 4 caracteres'); return; }
+    const eq = S.equipos.find(e => e.id === eid);
+    delegados[eid] = { nombre: eq.nombre, password: pw };
+    saveDelegados();
+    document.getElementById('delegPass').value = '';
+    renderDelegadosAdmin();
+    showNotif('Delegada de "' + eq.nombre + '" configurada ✓');
+  };
+  window.delDelegado = function(eid) {
+    delete delegados[eid];
+    saveDelegados();
+    renderDelegadosAdmin();
+    showNotif('Delegada eliminada');
+  };
+  function renderDelegadosAdmin() {
+    const el = document.getElementById('delegadosAdminList'); if (!el) return;
+    // populate equipo select
+    const sel = document.getElementById('delegEq');
+    if (sel) sel.innerHTML = '<option value="">Seleccionar equipo...</option>' + S.equipos.map(e => `<option value="${e.id}">${e.nombre}</option>`).join('');
+    if (!S.equipos.length) { el.innerHTML = '<p style="color:var(--gt);font-size:13px">Primero cargá los equipos.</p>'; return; }
+    const rows = S.equipos.map(e => {
+      const d = delegados[e.id];
+      return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--gr)">
+        <span class="tdot" style="background:${e.color}"></span>
+        <span style="flex:1;font-weight:600;font-size:13px">${e.nombre}</span>
+        ${d
+          ? `<span class="badge-ok">✓ Configurada</span><button class="bd" onclick="delDelegado('${e.id}')">Quitar</button>`
+          : `<span style="font-size:12px;color:var(--gt)">Sin delegada</span>`}
+      </div>`;
+    }).join('');
+    el.innerHTML = rows;
+  }
+  // Delegado panel render
+  function renderDelegadoJugadoras() {
+    const el = document.getElementById('delegJugList'); if (!el) return;
+    const eid = session.equipoId;
+    const eq = S.equipos.find(e => e.id === eid);
+    if (!eq) { el.innerHTML = '<p style="color:var(--gt)">Equipo no encontrado.</p>'; return; }
+    // populate equipo select (fixed to their team)
+    const sel = document.getElementById('delegEqJug');
+    if (sel) sel.innerHTML = `<option value="${eq.id}" selected>${eq.nombre}</option>`;
+    const jugs = S.jugadoras.filter(j => j.equipoId === eid).sort((a,b) => (a.dorsal||99)-(b.dorsal||99));
+    if (!jugs.length) { el.innerHTML = '<p style="color:var(--gt);font-size:13px">Aún no hay jugadoras cargadas.</p>'; return; }
+    el.innerHTML = `<table class="mtable"><thead><tr><th>#</th><th>Nombre</th><th>Dorsal</th><th>DNI</th><th>Nacimiento</th></tr></thead>
+    <tbody>${jugs.map((j,i) => {
+      const edad = j.fnac ? calcEdad(j.fnac) : null;
+      return `<tr><td style="color:var(--gt)">${i+1}</td><td>${j.nombre}</td><td>${j.dorsal||'—'}</td><td style="font-size:12px;color:var(--gt)">${j.dni||'—'}</td><td style="font-size:12px;color:var(--gt)">${j.fnac ? fmtFecha(j.fnac)+(edad!==null?` (${edad}a)`:'') : '—'}</td></tr>`;
+    }).join('')}</tbody></table>`;
+  }
+  window.addJugDelegado = function() {
+    const n    = document.getElementById('delegNJug').value.trim();
+    const d    = parseInt(document.getElementById('delegDJug').value) || 0;
+    const dni  = document.getElementById('delegDniJug').value.trim();
+    const fnac = document.getElementById('delegFnacJug').value;
+    const eid  = session.equipoId;
+    if (!n) { showNotif('Ingresá el nombre'); return; }
+    S.jugadoras.push({ id: 'j' + Date.now(), nombre: n, dorsal: d, equipoId: eid, dni, fnac });
+    document.getElementById('delegNJug').value = '';
+    document.getElementById('delegDJug').value = '';
+    document.getElementById('delegDniJug').value = '';
+    document.getElementById('delegFnacJug').value = '';
+    save(); renderDelegadoJugadoras();
+    showNotif(n + ' agregada ✓');
+  };
+
   function renderAll() {
     renderPos(); renderGol(); renderFix(); renderRes(); renderEqsPub(); renderDiscPublic();
+    populateDelegadasSelect();
+    if (session && session.type === 'delegado') renderDelegadoJugadoras();
     document.getElementById('torneoNombre').textContent    = S.nombre    || 'Liga Fútbol Femenino GEBA';
     document.getElementById('torneoTemporada').textContent = S.temporada || 'Temporada 2025';
   }
@@ -944,6 +1066,10 @@ body{font-family:'Barlow',sans-serif;background:var(--bl);color:#1a2e1a;min-heig
 .notif.on{display:block;animation:sli .3s ease;}
 @keyframes sli{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
 
+
+.deleg-banner{background:linear-gradient(135deg,#1a4a2e,#1a7a4a);color:#fff;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-radius:0;}
+.deleg-badge{background:var(--am);color:var(--vd);padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.5px;}
+
 @media(max-width:480px){.hdr-main{padding:8px 12px;}.logo-text h1{font-size:14px;}.sec{padding:12px;}.ta,.tb{font-size:11px;}}
 </style>
 </head>
@@ -1011,22 +1137,21 @@ body{font-family:'Barlow',sans-serif;background:var(--bl);color:#1a2e1a;min-heig
       <h3>Acceso Administradores</h3>
       <p>Cada organizador tiene su propio acceso.</p>
       <div class="fg"><label>Usuario</label>
-        <select id="loginUser">
+        <select id="loginUser" onchange="updateLoginPlaceholder()">
           <option value="">Seleccionar...</option>
-          <option value="org1">Organizador 1</option>
-          <option value="org2">Organizador 2</option>
-          <option value="org3">Organizador 3</option>
-          <option value="org4">Organizador 4</option>
+          <optgroup label="Administradores">
+            <option value="org1">Organizador 1</option>
+            <option value="org2">Organizador 2</option>
+            <option value="org3">Organizador 3</option>
+            <option value="org4">Organizador 4</option>
+          </optgroup>
+          <optgroup label="Delegadas de equipo" id="delegadasOptgroup"></optgroup>
         </select>
       </div>
       <div class="fg"><label>Contraseña</label><input type="password" id="loginPass" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()"></div>
       <button class="bp" onclick="doLogin()">Ingresar</button>
       <div class="berr" id="loginError"></div>
-      <div style="margin-top:14px;padding:10px;background:rgba(26,122,74,.07);border-radius:6px;font-size:11px;color:var(--gt);text-align:left">
-        <strong>Contraseñas iniciales:</strong><br><br>
-        Org 1: <strong>geba01</strong> &nbsp;|&nbsp; Org 2: <strong>geba02</strong><br>
-        Org 3: <strong>geba03</strong> &nbsp;|&nbsp; Org 4: <strong>geba04</strong>
-      </div>
+
     </div>
   </div>
 
@@ -1045,6 +1170,7 @@ body{font-family:'Barlow',sans-serif;background:var(--bl);color:#1a2e1a;min-heig
         <button class="atab" onclick="showATab('a-fix',this)">📅 Fixture</button>
         <button class="atab" onclick="showATab('a-res',this)">⚽ Resultados</button>
         <button class="atab" onclick="showATab('a-disc',this)">🟨 Disciplina</button>
+        <button class="atab" onclick="showATab('a-deleg',this)">🎽 Delegadas</button>
         <button class="atab" onclick="showATab('a-cfg',this)">⚙ Ajustes</button>
       </div>
 
@@ -1111,6 +1237,20 @@ body{font-family:'Barlow',sans-serif;background:var(--bl);color:#1a2e1a;min-heig
         <div id="discAdminAll"></div>
       </div>
 
+      <div id="a-deleg" class="acont">
+        <div class="iform">
+          <h4>➕ Asignar Delegada por Equipo</h4>
+          <p style="font-size:12px;color:var(--gt);margin-bottom:10px">Cada delegada puede ingresar con el ID de su equipo y la contraseña que asignés acá. Solo puede agregar jugadoras de su equipo.</p>
+          <div class="frow">
+            <div class="fg"><label>Equipo</label><select id="delegEq"></select></div>
+            <div class="fg"><label>Contraseña para la delegada</label><input type="password" id="delegPass" placeholder="Mínimo 4 caracteres"></div>
+          </div>
+          <button class="bp" style="margin-top:10px;width:auto;padding:7px 18px" onclick="addDelegado()">Guardar Delegada</button>
+        </div>
+        <div class="sec-title" style="font-size:15px;margin-bottom:10px">Estado de delegadas</div>
+        <div id="delegadosAdminList"></div>
+      </div>
+
       <div id="a-cfg" class="acont">
         <div class="pbox">
           <h4>✏️ Nombre del torneo</h4>
@@ -1135,6 +1275,37 @@ body{font-family:'Barlow',sans-serif;background:var(--bl);color:#1a2e1a;min-heig
           <div id="canchasList"></div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- DELEGADO PANEL -->
+  <div id="delegadoDash" style="display:none">
+    <div class="deleg-banner">
+      <div>
+        <div style="font-family:'Barlow Condensed',sans-serif;font-size:15px;font-weight:700">Panel Delegada</div>
+        <div style="font-size:11px;opacity:.75" id="delegadoLbl"></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="deleg-badge">Solo mi equipo</span>
+        <button onclick="doLogout()" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.3);color:#fff;padding:5px 11px;border-radius:6px;font-size:12px;cursor:pointer">Cerrar sesión</button>
+      </div>
+    </div>
+    <div class="apanel">
+      <div class="iform">
+        <h4>➕ Agregar Jugadora a mi equipo</h4>
+        <div class="frow">
+          <div class="fg"><label>Nombre completo</label><input type="text" id="delegNJug" placeholder="Nombre Apellido"></div>
+          <div class="fg" style="max-width:80px"><label>Dorsal</label><input type="number" id="delegDJug" placeholder="#" min="1" max="99"></div>
+          <select id="delegEqJug" style="display:none"></select>
+        </div>
+        <div class="frow" style="margin-top:8px">
+          <div class="fg"><label>N° Documento (DNI)</label><input type="text" id="delegDniJug" placeholder="Ej: 45123456"></div>
+          <div class="fg"><label>Fecha de Nacimiento</label><input type="date" id="delegFnacJug"></div>
+        </div>
+        <button class="bp" style="margin-top:10px;width:auto;padding:7px 18px" onclick="addJugDelegado()">Agregar Jugadora</button>
+      </div>
+      <div class="sec-title" style="font-size:15px;margin-bottom:10px">Jugadoras de mi equipo</div>
+      <div id="delegJugList"></div>
     </div>
   </div>
 </div>
